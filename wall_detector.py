@@ -1,250 +1,201 @@
 import ezdxf
 import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon
-import numpy as np
-import math
+import matplotlib.lines as mlines
+import matplotlib.collections as mcollections
+import numpy as np  # For min/max, and handling potential empty lists
 
-# ---------------------------
-# User step: Extract legend info from PDF manually using AI
-# ---------------------------
-print("=== Manual AI-assisted Legend Extraction ===")
-print("Please use the following prompt to query an AI (e.g., ChatGPT) with your explanatory PDF content:")
-print("""
-Prompt:
-"I have a PDF explaining wall types in a building plan. 
-Please extract a legend mapping wall type names (in Japanese or English) to typical CAD layer names or keywords that identify those walls in a CAD drawing.
-For example:
-- '外壁' (Exterior wall): Layer 'A - WALL'
-- '内壁' (Inner wall): Layer 'WALL_P'
-Return the mapping as a JSON or dictionary format."
-""")
-print("After you get the mapping, please input it below as a Python dictionary.")
-print("Example:")
-print("{'外壁': 'A - WALL', '内壁': 'WALL_P'}")
 
-# User inputs the legend mapping here:
-legend_mapping = {
-    "外壁部": "A - WALL",  # Example: Exterior walls might be on layer "A - WALL"
-    "Retaining walls": "RETW",  # Example: Retaining walls on "RETW"
-    "Boundary walls": "WALL",  # Example: General boundary walls on "WALL"
-    "Doors": "A - DOOR",  # Included based on your input, but typically not rendered as 'walls'
-    "Windows": "A - GLAZ"  # Included based on your input, but typically not rendered as 'walls'
-    # Add more mappings based on your PDF and actual DXF layers
-    # e.g., "Internal Partition": "WALL_INTERNAL"
-}
+def plot_selected_dxf_entities(doc_msp, selected_layers, dxf_filepath):
+    """
+    Plots selected entities (LINE, LWPOLYLINE, POLYLINE) from specified layers in a DXF modelspace.
+    Adjusts plot limits to focus on the selected entities.
+    """
+    fig, ax = plt.subplots(figsize=(10, 8))  # Adjust figure size as needed
 
-# ---------------------------
-# Load DXF and extract entities
-# ---------------------------
+    all_selected_points_x = []
+    all_selected_points_y = []
+    plotted_something = False
 
-DXF_FILE = "sample.dxf"  # Replace with your converted DXF filename
+    # This set tracks layers for which a legend entry has already been prepared
+    # to avoid duplicate legend entries from multiple entities on the same layer.
+    layers_with_legend_entry = set()
 
-try:
-    doc = ezdxf.readfile(DXF_FILE)
-except IOError:
-    print(f"Cannot open DXF file: {DXF_FILE}")
-    exit(1)
-except ezdxf.DXFStructureError:
-    print(f"Invalid or corrupted DXF file: {DXF_FILE}")
-    exit(1)
+    for entity in doc_msp:
+        if hasattr(entity, 'dxf') and hasattr(entity.dxf, 'layer') and \
+                entity.dxf.layer in selected_layers:
 
-msp = doc.modelspace()
+            current_entity_points_x = []
+            current_entity_points_y = []
 
-# --- Print all unique layer names from the DXF for debugging ---
-all_layers = set()
-for entity in msp:
+            # Determine label for legend: only provide it for the first entity of a layer
+            label_for_legend = ""
+            if entity.dxf.layer not in layers_with_legend_entry:
+                label_for_legend = entity.dxf.layer
+                layers_with_legend_entry.add(entity.dxf.layer)
+
+            if entity.dxftype() == 'LINE':
+                start_point = entity.dxf.start
+                end_point = entity.dxf.end
+                line = mlines.Line2D([start_point[0], end_point[0]],
+                                     [start_point[1], end_point[1]],
+                                     label=label_for_legend)
+                ax.add_line(line)
+                current_entity_points_x.extend([start_point[0], end_point[0]])
+                current_entity_points_y.extend([start_point[1], end_point[1]])
+                plotted_something = True
+
+            elif entity.dxftype() == 'LWPOLYLINE':
+                # get_points(format='xy') returns list of (x, y) tuples
+                points = list(entity.get_points(format='xy'))
+                if points:
+                    segments = []
+                    for i in range(len(points) - 1):
+                        segments.append([points[i], points[i + 1]])
+                    if entity.is_closed and len(points) > 1:  # Check len > 1 for closed polyline
+                        segments.append([points[-1], points[0]])
+
+                    if segments:
+                        lc = mcollections.LineCollection(segments, label=label_for_legend)
+                        ax.add_collection(lc)
+                        plotted_something = True
+
+                    for p_x, p_y in points:
+                        current_entity_points_x.append(p_x)
+                        current_entity_points_y.append(p_y)
+
+            elif entity.dxftype() == 'POLYLINE':
+                # For older POLYLINE entities, iterate through vertices
+                points = [(v.dxf.location[0], v.dxf.location[1]) for v in entity.vertices]
+                if points:
+                    segments = []
+                    for i in range(len(points) - 1):
+                        segments.append([points[i], points[i + 1]])
+                    if entity.is_closed and len(points) > 1:
+                        segments.append([points[-1], points[0]])
+
+                    if segments:
+                        lc = mcollections.LineCollection(segments, label=label_for_legend)
+                        ax.add_collection(lc)
+                        plotted_something = True
+
+                    for p_x, p_y in points:
+                        current_entity_points_x.append(p_x)
+                        current_entity_points_y.append(p_y)
+
+            all_selected_points_x.extend(current_entity_points_x)
+            all_selected_points_y.extend(current_entity_points_y)
+
+    if plotted_something and all_selected_points_x and all_selected_points_y:
+        min_x, max_x = min(all_selected_points_x), max(all_selected_points_x)
+        min_y, max_y = min(all_selected_points_y), max(all_selected_points_y)
+
+        width = max_x - min_x
+        height = max_y - min_y
+
+        # Add a margin (e.g., 10% of the span, or a fixed value if span is 0)
+        margin_x = width * 0.1 if width > 0 else 10  # Adjust '10' as needed for your coordinate scale
+        margin_y = height * 0.1 if height > 0 else 10  # Adjust '10' as needed
+
+        ax.set_xlim(min_x - margin_x, max_x + margin_x)
+        ax.set_ylim(min_y - margin_y, max_y + margin_y)
+    elif plotted_something:  # Plotted something, but maybe no geometric points (e.g. only text, not handled here)
+        ax.autoscale_view()  # Fallback to autoscale
+    else:
+        print("\nNo plottable entities (LINE, LWPOLYLINE, POLYLINE) found on the selected layers.")
+        print("Displaying an empty plot with default axes.")
+        ax.set_xlim(0, 100)  # Default view if nothing is plotted
+        ax.set_ylim(0, 100)
+
+    ax.set_xlabel('X coordinate')
+    ax.set_ylabel('Y coordinate')
+    ax.set_title(f'Selected Walls/Layers from: {dxf_filepath}')
+    ax.grid(True)
+    ax.set_aspect('equal', adjustable='box')
+
+    if layers_with_legend_entry:  # Only show legend if there are items with labels
+        ax.legend()
+
+    plt.show()
+
+
+def main():
+    dxf_filepath = input("Enter the path to your DXF file (e.g., sample.dxf): ").strip()
+
     try:
-        all_layers.add(entity.dxf.layer)
-    except AttributeError:
-        # Some entities might not have a layer attribute directly
-        pass
-print("\n=== Unique Layer Names Found in DXF ===")
-if all_layers:
-    for layer_name in sorted(list(all_layers)):
-        print(layer_name)
-else:
-    print("No layers found or no entities with layer attribute in modelspace.")
-print("========================================\n")
-print("Please compare these layer names with the values in your 'legend_mapping' dictionary.")
-print("Ensure the layer names in your DXF *exactly* match the values in the legend_mapping.\n")
+        doc = ezdxf.readfile(dxf_filepath)
+        msp = doc.modelspace()
+    except IOError:
+        print(f"Error: Cannot open DXF file '{dxf_filepath}'. Check path and permissions.")
+        return
+    except ezdxf.DXFStructureError:
+        print(f"Error: Invalid or corrupted DXF file '{dxf_filepath}'.")
+        return
+    except Exception as e:
+        print(f"An unexpected error occurred while reading the DXF file: {e}")
+        return
 
-# For testing: Extract ALL LINE, LWPOLYLINE, POLYLINE entities
-# The goal is to render something to verify the pipeline.
-potential_wall_entities = []
-for e in msp:
-    if e.dxftype() in ('LINE', 'LWPOLYLINE', 'POLYLINE'):
-        potential_wall_entities.append(e)
+    # Get all unique layer names from the modelspace entities that have a layer attribute
+    all_layers = sorted(list(set(entity.dxf.layer
+                                 for entity in msp
+                                 if hasattr(entity, 'dxf') and hasattr(entity.dxf, 'layer'))))
 
-if not potential_wall_entities:
-    print(f"No LINE, LWPOLYLINE, or POLYLINE entities found in the modelspace of {DXF_FILE}.")
-    print("Check if the DXF file contains these entity types or if they are in a different space (e.g., paperspace).")
-    # exit(1) # You might want to exit if nothing to render
+    if not all_layers:
+        print("No layers found in the DXF file's modelspace.")
+        return
 
-# Extract text labels (wall type names) and their positions
-text_entities = []
-for e in msp.query('TEXT MTEXT'):
-    text_str = e.plain_text() if e.dxftype() == 'MTEXT' else e.dxf.text
-    text_entities.append({
-        'text': text_str.strip(),
-        'insert': (e.dxf.insert.x, e.dxf.insert.y)
-    })
+    print("\nAvailable layers (interpreted as wall names):")
+    for i, layer_name in enumerate(all_layers):
+        print(f"  {i + 1}. {layer_name}")
 
+    selected_layers_names = []
+    while True:
+        user_input = input(f"\nEnter the numbers of the layers you want to render (e.g., 1,3), "
+                           f"or type 'all' to render all ({len(all_layers)} layers): ").strip().lower()
 
-# ---------------------------
-# Classify entities
-# ---------------------------
+        if user_input == 'all':
+            selected_layers_names = all_layers
+            print(f"Selected all {len(all_layers)} layers.")
+            break
 
-def distance_point_to_line_segment(px, py, x1, y1, x2, y2):
-    line_mag_sq = (x2 - x1) ** 2 + (y2 - y1) ** 2
-    if line_mag_sq < 1e-12:  # Treat as point if segment is very short
-        return math.hypot(px - x1, py - y1)
-    t = max(0, min(1, ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / line_mag_sq))
-    closest_x = x1 + t * (x2 - x1)
-    closest_y = y1 + t * (y2 - y1)
-    return math.hypot(px - closest_x, py - closest_y)
+        if not user_input:  # Empty input
+            print("No selection. Please enter layer numbers or 'all'.")
+            continue
 
+        try:
+            selected_indices = [int(i.strip()) - 1 for i in user_input.split(',')]
 
-ASSOCIATION_DISTANCE_THRESHOLD = 200  # Adjust as needed based on CAD units
+            temp_selected_layers = []
+            valid_selection = True
+            for index in selected_indices:
+                if 0 <= index < len(all_layers):
+                    temp_selected_layers.append(all_layers[index])
+                else:
+                    print(f"Error: Number {index + 1} is out of range (1 to {len(all_layers)}).")
+                    valid_selection = False
+                    break  # Stop processing this input string
 
-# Build reverse legend mapping: layer -> wall type name
-layer_to_type_name = {v: k for k, v in legend_mapping.items()}
+            if valid_selection:
+                # Use set to ensure uniqueness if user enters same number multiple times, then convert to list
+                selected_layers_names = sorted(list(set(temp_selected_layers)))
+                if selected_layers_names:
+                    print(f"You selected layers: {', '.join(selected_layers_names)}")
+                    break
+                else:  # e.g. user entered numbers but they were all invalid or resulted in empty list after processing
+                    print("No valid layers selected from your input. Please try again.")
+            else:
+                # An invalid index was found, loop again for new input
+                pass
 
-classified_elements = []
+        except ValueError:
+            print("Invalid input. Please enter numbers separated by commas (e.g., 1,3) or 'all'.")
+        except Exception as e:  # Catch any other unexpected error during selection
+            print(f"An error occurred during selection: {e}")
 
-for entity in potential_wall_entities:
-    layer = entity.dxf.layer
-    element_type = layer_to_type_name.get(layer, "Unknown Wall")
-
-    coords = []
-    is_closed = False
-
-    if entity.dxftype() == 'LINE':
-        start = entity.dxf.start
-        end = entity.dxf.end
-        coords = [(start.x, start.y), (end.x, end.y)]
-    elif entity.dxftype() == 'LWPOLYLINE':
-        coords = [(point[0], point[1]) for point in entity.get_points()]
-        is_closed = entity.is_closed  # ezdxf property for LWPOLYLINE
-    elif entity.dxftype() == 'POLYLINE':
-        coords = [(point[0], point[1]) for point in entity.get_points()]
-        is_closed = entity.is_closed  # ezdxf property for POLYLINE
+    if selected_layers_names:
+        plot_selected_dxf_entities(msp, selected_layers_names, dxf_filepath)
     else:
-        continue
-
-    if not coords:  # Skip if no coordinates extracted
-        continue
-
-    # Attempt to refine type using nearby text labels
-    assigned_label_text = None
-    min_dist_to_label = float('inf')
-
-    for text_info in text_entities:
-        label_text_content = text_info['text']
-        label_px, label_py = text_info['insert']
-
-        current_min_dist_to_entity = float('inf')
-        if len(coords) == 2:  # Line
-            current_min_dist_to_entity = distance_point_to_line_segment(label_px, label_py, coords[0][0], coords[0][1],
-                                                                        coords[1][0], coords[1][1])
-        elif len(coords) > 2:  # Polyline
-            for i in range(len(coords)):
-                p1 = coords[i]
-                p2 = coords[(i + 1) % len(coords)]  # Loop back for closed polylines if necessary
-                dist_to_segment = distance_point_to_line_segment(label_px, label_py, p1[0], p1[1], p2[0], p2[1])
-                current_min_dist_to_entity = min(current_min_dist_to_entity, dist_to_segment)
-
-        if current_min_dist_to_entity < ASSOCIATION_DISTANCE_THRESHOLD and current_min_dist_to_entity < min_dist_to_label:
-            # Check if the text_info['text'] corresponds to a known type in the legend_mapping keys
-            if label_text_content in legend_mapping:
-                assigned_label_text = label_text_content
-                min_dist_to_label = current_min_dist_to_entity
-
-    if assigned_label_text:
-        element_type = assigned_label_text  # Override type if a relevant label is found nearby
-
-    classified_elements.append({
-        'type': element_type,
-        'layer': layer,
-        'coordinates': coords,
-        'entity_type': entity.dxftype(),
-        'is_closed': is_closed
-    })
-
-# ---------------------------
-# Visualization with matplotlib
-# ---------------------------
-
-# Define colors for wall types (add more as needed for your specific types)
-color_map = {
-    "外壁部": "darkred",  # Typical for exterior walls
-    "Retaining walls": "saddlebrown",
-    "Boundary walls": "darkgreen",
-    "Doors": "blueviolet",  # Doors (if you want to render them)
-    "Windows": "deepskyblue",  # Windows (if you want to render them)
-    "Unknown Wall": "gray",  # Default for walls not in legend or unidentified
-    # Add other specific types from your legend_mapping here
-    # e.g., "Internal Partition": "dodgerblue"
-}
-
-plt.figure(figsize=(15, 10))  # Increased figure size
-ax = plt.gca()
-ax.set_aspect('equal')
-ax.set_title(f'DXF Rendering - All LINEs & POLYLINEs from {DXF_FILE}')
-
-if not classified_elements:
-    print("No elements were classified for rendering. The plot will be empty.")
-    ax.text(0.5, 0.5, "No elements found or classified for rendering.",
-            horizontalalignment='center', verticalalignment='center',
-            transform=ax.transAxes, fontsize=12, color='red')
-
-# Draw elements
-rendered_labels_legend = set()  # To avoid duplicate legend entries
-
-for element in classified_elements:
-    coords = element['coordinates']
-    element_display_type = element['type']
-    color = color_map.get(element_display_type, 'black')
-    label_for_legend = element_display_type
-    if label_for_legend in rendered_labels_legend:
-        label_for_legend = "_nolegend_"
-    else:
-        rendered_labels_legend.add(label_for_legend)
-
-    entity_type = element['entity_type']
-    # Use stored is_closed flag if available, else assume False
-    is_closed = element.get('is_closed', True)
-
-    if entity_type == 'LINE' and len(coords) == 2:
-        xs, ys = zip(*coords)
-        ax.plot(xs, ys, color=color, linewidth=2, label=label_for_legend)
-    elif entity_type in ('LWPOLYLINE', 'POLYLINE') and len(coords) > 1:
-        if not is_closed:
-            xs, ys = zip(*coords)
-            ax.plot(xs, ys, color=color, linewidth=2, label=label_for_legend)
-        else:
-            polygon = Polygon(coords, closed=True, fill=False, edgecolor=color, linewidth=2, label=label_for_legend)
-            ax.add_patch(polygon)
+        print("No layers were ultimately selected for rendering.")
 
 
-        # Optional: Add text label on the plot at the centroid
-        # if coords:
-        #     poly_np = np.array(coords)
-        #     centroid = poly_np.mean(axis=0)
-        #     ax.text(centroid[0], centroid[1], element_display_type, fontsize=8, color=color, ha='center', va='center', alpha=0.7)
-
-# Create a legend with unique entries
-handles, labels = ax.get_legend_handles_labels()
-if handles:  # Only show legend if there's something to show
-    by_label = dict(zip(labels, handles))
-    ax.legend(by_label.values(), by_label.keys(), loc='upper left', bbox_to_anchor=(1, 1))
-
-plt.xlabel('X coordinate')
-plt.ylabel('Y coordinate')
-plt.grid(True)
-
-plt.xlim(2500, 2800)  # Adjust these numbers as needed
-plt.ylim(1800, 2200)
-
-plt.tight_layout(rect=[0, 0, 0.85, 1])  # Adjust layout to make space for legend outside
-plt.show()
-
+if __name__ == "__main__":
+    main()
