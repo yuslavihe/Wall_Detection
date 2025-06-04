@@ -1,7 +1,0 @@
-ezdxf>=0.17
-shapely>=1.8
-matplotlib>=3.5
-pdfminer.six>=20211012
-numpy>=1.22
-pandas>=1.4
-pytest>=7.0
