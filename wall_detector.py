@@ -1,201 +1,231 @@
 import ezdxf
 import matplotlib.pyplot as plt
-import matplotlib.lines as mlines
-import matplotlib.collections as mcollections
-import numpy as np  # For min/max, and handling potential empty lists
+from matplotlib.patches import Polygon
+import numpy as np
+import math
 
+# ---------------------------
+# Configuration
+# ---------------------------
 
-def plot_selected_dxf_entities(doc_msp, selected_layers, dxf_filepath):
-    """
-    Plots selected entities (LINE, LWPOLYLINE, POLYLINE) from specified layers in a DXF modelspace.
-    Adjusts plot limits to focus on the selected entities.
-    """
-    fig, ax = plt.subplots(figsize=(10, 8))  # Adjust figure size as needed
+DXF_FILE = "sample.dxf"
 
-    all_selected_points_x = []
-    all_selected_points_y = []
-    plotted_something = False
+# Legend extraction and mapping
+legend_mapping = {
+    "外壁部": "A - WALL",
+    "Retaining walls": "RETW",
+    "Boundary walls": "WALL",
+    "Doors": "A - DOOR",
+    "Windows": "A - GLAZ"
+}
 
-    # This set tracks layers for which a legend entry has already been prepared
-    # to avoid duplicate legend entries from multiple entities on the same layer.
-    layers_with_legend_entry = set()
+# Association distance threshold
+ASSOCIATION_DISTANCE_THRESHOLD = 200
 
-    for entity in doc_msp:
-        if hasattr(entity, 'dxf') and hasattr(entity.dxf, 'layer') and \
-                entity.dxf.layer in selected_layers:
+# Reverse legend mapping
+layer_to_type_name = {v: k for k, v in legend_mapping.items()}
 
-            current_entity_points_x = []
-            current_entity_points_y = []
+# Color map
+color_map = {
+    "外壁部": "darkred",
+    "Retaining walls": "saddlebrown",
+    "Boundary walls": "darkgreen",
+    "Doors": "blueviolet",
+    "Windows": "deepskyblue",
+    "Unknown Wall": "gray"
+}
 
-            # Determine label for legend: only provide it for the first entity of a layer
-            label_for_legend = ""
-            if entity.dxf.layer not in layers_with_legend_entry:
-                label_for_legend = entity.dxf.layer
-                layers_with_legend_entry.add(entity.dxf.layer)
+# Default values
+default_dpi = 100
+default_xlim = (2500, 2800)
+default_ylim = (1800, 2200)
 
-            if entity.dxftype() == 'LINE':
-                start_point = entity.dxf.start
-                end_point = entity.dxf.end
-                line = mlines.Line2D([start_point[0], end_point[0]],
-                                     [start_point[1], end_point[1]],
-                                     label=label_for_legend)
-                ax.add_line(line)
-                current_entity_points_x.extend([start_point[0], end_point[0]])
-                current_entity_points_y.extend([start_point[1], end_point[1]])
-                plotted_something = True
+# ---------------------------
+# Utility functions
+# ---------------------------
 
-            elif entity.dxftype() == 'LWPOLYLINE':
-                # get_points(format='xy') returns list of (x, y) tuples
-                points = list(entity.get_points(format='xy'))
-                if points:
-                    segments = []
-                    for i in range(len(points) - 1):
-                        segments.append([points[i], points[i + 1]])
-                    if entity.is_closed and len(points) > 1:  # Check len > 1 for closed polyline
-                        segments.append([points[-1], points[0]])
+def distance_point_to_line_segment(px, py, x1, y1, x2, y2):
+    line_mag_sq = (x2 - x1) ** 2 + (y2 - y1) ** 2
+    if line_mag_sq < 1e-12:
+        return math.hypot(px - x1, py - y1)
+    t = max(0, min(1, ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / line_mag_sq))
+    closest_x = x1 + t * (x2 - x1)
+    closest_y = y1 + t * (y2 - y1)
+    return math.hypot(px - closest_x, py - closest_y)
 
-                    if segments:
-                        lc = mcollections.LineCollection(segments, label=label_for_legend)
-                        ax.add_collection(lc)
-                        plotted_something = True
+# ---------------------------
+# Load DXF and extract entities
+# ---------------------------
 
-                    for p_x, p_y in points:
-                        current_entity_points_x.append(p_x)
-                        current_entity_points_y.append(p_y)
+try:
+    doc = ezdxf.readfile(DXF_FILE)
+except IOError:
+    print(f"Cannot open DXF file: {DXF_FILE}")
+    exit(1)
+except ezdxf.DXFStructureError:
+    print(f"Invalid or corrupted DXF file: {DXF_FILE}")
+    exit(1)
 
-            elif entity.dxftype() == 'POLYLINE':
-                # For older POLYLINE entities, iterate through vertices
-                points = [(v.dxf.location[0], v.dxf.location[1]) for v in entity.vertices]
-                if points:
-                    segments = []
-                    for i in range(len(points) - 1):
-                        segments.append([points[i], points[i + 1]])
-                    if entity.is_closed and len(points) > 1:
-                        segments.append([points[-1], points[0]])
+msp = doc.modelspace()
 
-                    if segments:
-                        lc = mcollections.LineCollection(segments, label=label_for_legend)
-                        ax.add_collection(lc)
-                        plotted_something = True
+potential_wall_entities = [e for e in msp if e.dxftype() in ('LINE', 'LWPOLYLINE', 'POLYLINE')]
 
-                    for p_x, p_y in points:
-                        current_entity_points_x.append(p_x)
-                        current_entity_points_y.append(p_y)
+text_entities = []
+for e in msp.query('TEXT MTEXT'):
+    text_str = e.plain_text() if e.dxftype() == 'MTEXT' else e.dxf.text
+    text_entities.append({
+        'text': text_str.strip(),
+        'insert': (e.dxf.insert.x, e.dxf.insert.y)
+    })
 
-            all_selected_points_x.extend(current_entity_points_x)
-            all_selected_points_y.extend(current_entity_points_y)
+# ---------------------------
+# Classify entities
+# ---------------------------
 
-    if plotted_something and all_selected_points_x and all_selected_points_y:
-        min_x, max_x = min(all_selected_points_x), max(all_selected_points_x)
-        min_y, max_y = min(all_selected_points_y), max(all_selected_points_y)
+classified_elements = []
 
-        width = max_x - min_x
-        height = max_y - min_y
+for entity in potential_wall_entities:
+    layer = entity.dxf.layer
+    element_type = layer_to_type_name.get(layer, "Unknown Wall")
 
-        # Add a margin (e.g., 10% of the span, or a fixed value if span is 0)
-        margin_x = width * 0.1 if width > 0 else 10  # Adjust '10' as needed for your coordinate scale
-        margin_y = height * 0.1 if height > 0 else 10  # Adjust '10' as needed
+    coords = []
+    is_closed = False
 
-        ax.set_xlim(min_x - margin_x, max_x + margin_x)
-        ax.set_ylim(min_y - margin_y, max_y + margin_y)
-    elif plotted_something:  # Plotted something, but maybe no geometric points (e.g. only text, not handled here)
-        ax.autoscale_view()  # Fallback to autoscale
+    if entity.dxftype() == 'LINE':
+        start = entity.dxf.start
+        end = entity.dxf.end
+        coords = [(start.x, start.y), (end.x, end.y)]
+    elif entity.dxftype() == 'LWPOLYLINE':
+        coords = [(point[0], point[1]) for point in entity.get_points()]
+        is_closed = entity.is_closed
+    elif entity.dxftype() == 'POLYLINE':
+        coords = [(point[0], point[1]) for point in entity.get_points()]
+        is_closed = entity.is_closed
     else:
-        print("\nNo plottable entities (LINE, LWPOLYLINE, POLYLINE) found on the selected layers.")
-        print("Displaying an empty plot with default axes.")
-        ax.set_xlim(0, 100)  # Default view if nothing is plotted
-        ax.set_ylim(0, 100)
+        continue
+
+    if not coords:
+        continue
+
+    assigned_label_text = None
+    min_dist_to_label = float('inf')
+
+    for text_info in text_entities:
+        label_text_content = text_info['text']
+        label_px, label_py = text_info['insert']
+
+        current_min_dist_to_entity = float('inf')
+        if len(coords) == 2:
+            current_min_dist_to_entity = distance_point_to_line_segment(label_px, label_py, coords[0][0], coords[0][1],
+                                                                        coords[1][0], coords[1][1])
+        elif len(coords) > 2:
+            for i in range(len(coords)):
+                p1 = coords[i]
+                p2 = coords[(i + 1) % len(coords)]
+                dist_to_segment = distance_point_to_line_segment(label_px, label_py, p1[0], p1[1], p2[0], p2[1])
+                current_min_dist_to_entity = min(current_min_dist_to_entity, dist_to_segment)
+
+        if current_min_dist_to_entity < ASSOCIATION_DISTANCE_THRESHOLD and current_min_dist_to_entity < min_dist_to_label:
+            if label_text_content in legend_mapping:
+                assigned_label_text = label_text_content
+                min_dist_to_label = current_min_dist_to_entity
+
+    if assigned_label_text:
+        element_type = assigned_label_text
+
+    classified_elements.append({
+        'type': element_type,
+        'layer': layer,
+        'coordinates': coords,
+        'entity_type': entity.dxftype(),
+        'is_closed': is_closed
+    })
+
+# ---------------------------
+# Visualization with matplotlib
+# ---------------------------
+
+def plot_dxf(dpi, xlim, ylim):
+    plt.figure(figsize=(15, 10), dpi=dpi)
+    ax = plt.gca()
+    ax.set_aspect('equal')
+    ax.set_title(f'DXF Rendering - All LINEs & POLYLINEs from {DXF_FILE}')
+
+    if not classified_elements:
+        print("No elements were classified for rendering. The plot will be empty.")
+        ax.text(0.5, 0.5, "No elements found or classified for rendering.",
+                horizontalalignment='center', verticalalignment='center',
+                transform=ax.transAxes, fontsize=12, color='red')
+
+    rendered_labels_legend = set()
+
+    for element in classified_elements:
+        coords = element['coordinates']
+        element_display_type = element['type']
+        color = color_map.get(element_display_type, 'black')
+        label_for_legend = element_display_type
+        if label_for_legend in rendered_labels_legend:
+            label_for_legend = "_nolegend_"
+        else:
+            rendered_labels_legend.add(label_for_legend)
+
+        entity_type = element['entity_type']
+        is_closed = element.get('is_closed', True)
+
+        if entity_type == 'LINE' and len(coords) == 2:
+            xs, ys = zip(*coords)
+            ax.plot(xs, ys, color=color, linewidth=2, label=label_for_legend)
+        elif entity_type in ('LWPOLYLINE', 'POLYLINE') and len(coords) > 1:
+            if not is_closed:
+                xs, ys = zip(*coords)
+                ax.plot(xs, ys, color=color, linewidth=2, label=label_for_legend)
+            else:
+                polygon = Polygon(coords, closed=True, fill=False, edgecolor=color, linewidth=2, label=label_for_legend)
+                ax.add_patch(polygon)
+
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        by_label = dict(zip(labels, handles))
+        ax.legend(by_label.values(), by_label.keys(), loc='upper left', bbox_to_anchor=(1, 1))
 
     ax.set_xlabel('X coordinate')
     ax.set_ylabel('Y coordinate')
-    ax.set_title(f'Selected Walls/Layers from: {dxf_filepath}')
     ax.grid(True)
-    ax.set_aspect('equal', adjustable='box')
 
-    if layers_with_legend_entry:  # Only show legend if there are items with labels
-        ax.legend()
+    ax.set_xlim(xlim[0], xlim[1])
+    ax.set_ylim(ylim[0], ylim[1])
 
+    plt.tight_layout(rect=[0, 0, 0.85, 1])
     plt.show()
 
+# ---------------------------
+# User input for customization
+# ---------------------------
 
-def main():
-    dxf_filepath = input("Enter the path to your DXF file (e.g., sample.dxf): ").strip()
+dpi = default_dpi
+xlim = default_xlim
+ylim = default_ylim
 
-    try:
-        doc = ezdxf.readfile(dxf_filepath)
-        msp = doc.modelspace()
-    except IOError:
-        print(f"Error: Cannot open DXF file '{dxf_filepath}'. Check path and permissions.")
-        return
-    except ezdxf.DXFStructureError:
-        print(f"Error: Invalid or corrupted DXF file '{dxf_filepath}'.")
-        return
-    except Exception as e:
-        print(f"An unexpected error occurred while reading the DXF file: {e}")
-        return
+try:
+    dpi = int(input(f"Enter DPI for the plot (default {default_dpi}): ") or default_dpi)
+    xlim_str = input(f"Enter X limits as xmin,xmax (default {default_xlim[0]},{default_xlim[1]}): ")
+    ylim_str = input(f"Enter Y limits as ymin,ymax (default {default_ylim[0]},{default_ylim[1]}): ")
 
-    # Get all unique layer names from the modelspace entities that have a layer attribute
-    all_layers = sorted(list(set(entity.dxf.layer
-                                 for entity in msp
-                                 if hasattr(entity, 'dxf') and hasattr(entity.dxf, 'layer'))))
+    if xlim_str:
+        xlim = tuple(map(float, xlim_str.split(',')))
+    if ylim_str:
+        ylim = tuple(map(float, ylim_str.split(',')))
 
-    if not all_layers:
-        print("No layers found in the DXF file's modelspace.")
-        return
+except ValueError:
+    print("Invalid input. Using default values.")
+    dpi = default_dpi
+    xlim = default_xlim
+    ylim = default_ylim
+except Exception as e:
+    print(f"An unexpected error occurred: {e}")
 
-    print("\nAvailable layers (interpreted as wall names):")
-    for i, layer_name in enumerate(all_layers):
-        print(f"  {i + 1}. {layer_name}")
+# ---------------------------
+# Plot with user customization
+# ---------------------------
 
-    selected_layers_names = []
-    while True:
-        user_input = input(f"\nEnter the numbers of the layers you want to render (e.g., 1,3), "
-                           f"or type 'all' to render all ({len(all_layers)} layers): ").strip().lower()
-
-        if user_input == 'all':
-            selected_layers_names = all_layers
-            print(f"Selected all {len(all_layers)} layers.")
-            break
-
-        if not user_input:  # Empty input
-            print("No selection. Please enter layer numbers or 'all'.")
-            continue
-
-        try:
-            selected_indices = [int(i.strip()) - 1 for i in user_input.split(',')]
-
-            temp_selected_layers = []
-            valid_selection = True
-            for index in selected_indices:
-                if 0 <= index < len(all_layers):
-                    temp_selected_layers.append(all_layers[index])
-                else:
-                    print(f"Error: Number {index + 1} is out of range (1 to {len(all_layers)}).")
-                    valid_selection = False
-                    break  # Stop processing this input string
-
-            if valid_selection:
-                # Use set to ensure uniqueness if user enters same number multiple times, then convert to list
-                selected_layers_names = sorted(list(set(temp_selected_layers)))
-                if selected_layers_names:
-                    print(f"You selected layers: {', '.join(selected_layers_names)}")
-                    break
-                else:  # e.g. user entered numbers but they were all invalid or resulted in empty list after processing
-                    print("No valid layers selected from your input. Please try again.")
-            else:
-                # An invalid index was found, loop again for new input
-                pass
-
-        except ValueError:
-            print("Invalid input. Please enter numbers separated by commas (e.g., 1,3) or 'all'.")
-        except Exception as e:  # Catch any other unexpected error during selection
-            print(f"An error occurred during selection: {e}")
-
-    if selected_layers_names:
-        plot_selected_dxf_entities(msp, selected_layers_names, dxf_filepath)
-    else:
-        print("No layers were ultimately selected for rendering.")
-
-
-if __name__ == "__main__":
-    main()
+plot_dxf(dpi, xlim, ylim)
